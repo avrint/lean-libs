@@ -1,0 +1,26 @@
+{
+  "name": "lean-libs",
+  "version": "1.0.0",
+  "description": "`lean-libs` installs an npm library into a temporary folder, bundles it using `esbuild` and `dts-bundle-generator`, outputs static files into your project, and cleans up after itself. Perfect for Astro, static sites, or zero-dependency setups.",
+  "keywords": [],
+  "homepage": "https://github.com/avrint/lean-libs#readme",
+  "bugs": {
+    "url": "https://github.com/avrint/lean-libs/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/avrint/lean-libs.git"
+  },
+  "type": "module",
+  "main": "index.js",
+  "module": "index.js",
+  "bin": {
+    "lean-libs": "./index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "yargs": "^17.7.2"
+  }
+}
