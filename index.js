@@ -80,12 +80,14 @@ try {
     throw new Error(`esbuild error: ${esbuildRes.stderr.toString()}`);
   }
 
+  const typesEntryPoint = path.join(tempDir, 'node_modules', pkgName, pkgJson.types || pkgJson.typings || 'index.d.ts'); Bun.spawnSync(['npx', 'dts-bundle-generator', '-o', dtsOutputFile, typesEntryPoint, '--no-check'], { cwd: tempDir });
+
   // 4. Bundle d.ts types using dts-bundle-generator
   console.log(`📝 Bundling type definitions to ${dtsOutputFile}...`);
   const dtsRes = Bun.spawnSync([
     'npx', 'dts-bundle-generator',
     '-o', dtsOutputFile,
-    entryPoint,
+    typesEntryPoint,
     '--no-check',
     '--export-nameless'
   ], { cwd: tempDir });
