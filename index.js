@@ -5,8 +5,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { glob } from 'glob';
-
+import { rollup } from 'rollup';
+import resolve from '@rollup/plugin-node-resolve';
+import commonjs from '@rollup/plugin-commonjs';
+import terser from '@rollup/plugin-terser';
+import { dts } from 'rollup-plugin-dts';
 
 const argv = yargs(hideBin(process.argv))
   .scriptName('lean-libs')
@@ -37,7 +40,9 @@ const argv = yargs(hideBin(process.argv))
   .argv;
 
 const pkgName = argv.package;
-const globalName = argv['global-name'] || pkgName;
+const globalName =
+  (argv['global-name']) ||
+  pkgName.replace(/[@\/\-]/g, '_').replace(/^_+/, '');
 const jsOutDir = path.resolve(process.cwd(), argv['js-out']);
 const dtsOutDir = path.resolve(process.cwd(), argv['dts-out']);
 
@@ -47,82 +52,159 @@ const tempDir = mkdtempSync(path.join(tmpdir(), 'lean-libs-'));
 try {
   console.log(`📦 Preparing temp directory at ${tempDir}...`);
 
-  // 1. Initialize temporary package and install requested library
+  // 1. Initialize temporary package and install the requested library
   Bun.spawnSync(['bun', 'init', '-y'], { cwd: tempDir });
   console.log(`⬇️  Installing ${pkgName}...`);
-  const installRes = Bun.spawnSync(['bun', 'add', pkgName, 'esbuild', 'typescript'], { cwd: tempDir });
+  const installRes = Bun.spawnSync(['bun', 'add', pkgName], { cwd: tempDir });
 
   if (installRes.exitCode !== 0) {
     throw new Error(`Failed to install package: ${installRes.stderr.toString()}`);
   }
 
-  // 2. Resolve entry points
+  // 2. Resolve entry points from the package's package.json
   const pkgJsonPath = path.join(tempDir, 'node_modules', pkgName, 'package.json');
   const pkgJson = await Bun.file(pkgJsonPath).json();
-  const entryPoint = path.join(tempDir, 'node_modules', pkgName, pkgJson.module || pkgJson.main || 'index.js');
+
+  // Prefer modern "exports" → module → main
+  let entryPoint;
+  const exp = pkgJson.exports?.['.'];
+  if (typeof exp === 'string') {
+    entryPoint = path.join(tempDir, 'node_modules', pkgName, exp);
+  } else if (exp?.import) {
+    entryPoint = path.join(
+      tempDir,
+      'node_modules',
+      pkgName,
+      typeof exp.import === 'string' ? exp.import : exp.import.default || exp.import
+    );
+  } else if (pkgJson.module) {
+    entryPoint = path.join(tempDir, 'node_modules', pkgName, pkgJson.module);
+  } else {
+    entryPoint = path.join(
+      tempDir,
+      'node_modules',
+      pkgName,
+      pkgJson.main || 'index.js'
+    );
+  }
+
+  // Prefer types entry for d.ts
+  let typesEntry = null;
+  if (exp?.types) {
+    typesEntry = path.join(tempDir, 'node_modules', pkgName, exp.types);
+  } else if (pkgJson.types || pkgJson.typings) {
+    typesEntry = path.join(
+      tempDir,
+      'node_modules',
+      pkgName,
+      pkgJson.types || pkgJson.typings
+    );
+  } else {
+    // Fallback: try index.d.ts next to the main entry
+    const candidate = entryPoint.replace(/\.(m?js|cjs)$/, '.d.ts');
+    if (await Bun.file(candidate).exists()) {
+      typesEntry = candidate;
+    }
+  }
 
   mkdirSync(jsOutDir, { recursive: true });
   mkdirSync(dtsOutDir, { recursive: true });
 
-  const jsOutputFile = path.join(jsOutDir, `${pkgName}.umd.min.js`);
-  const dtsOutputFile = path.join(dtsOutDir, `${pkgName}.d.ts`);
+  const safeName = pkgName.replace('/', '-');
+  const jsOutputFile = path.join(jsOutDir, `${safeName}.umd.min.js`);
+  const dtsOutputFile = path.join(dtsOutDir, `${safeName}.d.ts`);
 
-  // 3. Bundle JS into UMD format using esbuild
-  console.log(`⚡ Bundling UMD to ${jsOutputFile}...`);
-  const esbuildRes = Bun.spawnSync([
-    'bun', 'esbuild', entryPoint,
-    '--bundle',
-    '--minify',
-    '--format=iife',
-    `--global-name=${globalName}`,
-    `--outfile=${jsOutputFile}`
-  ], { cwd: tempDir });
+  // -------------------------------------------------------
+  // 3. Programmatic UMD JS bundle with Rollup
+  // -------------------------------------------------------
+  console.log(`⚡ Bundling UMD with Rollup → ${jsOutputFile}...`);
 
-  if (esbuildRes.exitCode !== 0) {
-    throw new Error(`esbuild error: ${esbuildRes.stderr.toString()}`);
-  }
+  const jsBundle = await rollup({
+    input: entryPoint,
+    plugins: [
+      resolve({ browser: true, preferBuiltins: false }),
+      commonjs(),
+      terser(),
+    ],
+  });
 
-  const typesTempDir = path.join(tempDir, 'types-out');
-  mkdirSync(typesTempDir, { recursive: true });
+  await jsBundle.write({
+    file: jsOutputFile,
+    format: 'umd',
+    name: globalName,
+    sourcemap: false,
+  });
 
+  await jsBundle.close();
 
-  // 4. Generate d.ts types using tsc
-  console.log(`📝 Bundling type definitions to ${dtsOutputFile}...`);
-  const dtsRes = Bun.spawnSync([
-    'bun', 'tsc', entryPoint,
-    '--declaration',
-    '--allowJs',
-    '--ignoreConfig',
-    '--emitDeclarationOnly',
-    '--outDir', typesTempDir
-  ], { cwd: tempDir });
+  // -------------------------------------------------------
+  // 4. Programmatic type definition bundle with rollup-plugin-dts
+  // -------------------------------------------------------
+  if (typesEntry) {
+    console.log(
+      `📝 Bundling type definitions with rollup-plugin-dts → ${dtsOutputFile}...`
+    );
 
-  if (dtsRes.exitCode !== 0) {
-    throw new Error(`tsc error: ${dtsRes.stderr.toString()}\n${dtsRes.stdout.toString()}`);
-  }
+    const dtsBundle = await rollup({
+      input: typesEntry,
+      plugins: [
+        // Resolve relative .d.ts files that live next to the package
+        resolve({
+          extensions: ['.d.ts', '.ts', '.js'],
+          preferBuiltins: false,
+        }),
+        dts({
+          // Force full inlining of the package's own types
+          respectExternal: true,          // ← critical: don't treat relative paths as external
+        }),
+      ],
+      // Make sure relative imports inside the package are *not* marked external
+      external: (id) => {
+        // Keep real third-party packages external, but allow everything
+        // that belongs to the target package (relative or absolute path)
+        return !id.startsWith('.') && !id.startsWith('/') && !id.includes(pkgName);
+      },
+    });
 
-  const generatedDtsPath = await glob("*.d.*ts", { cwd: typesTempDir, absolute: true });
+    await dtsBundle.write({
+      file: dtsOutputFile,
+      format: 'es',
+    });
 
-  // 5. Append ambient global Window declaration to the d.ts file
-  const dtsContent = await Bun.file(generatedDtsPath[0]).text();
-  const typeAlias = globalName.charAt(0).toUpperCase() + globalName.slice(1);
-  const globalDeclaration = `
+    await dtsBundle.close();
+
+    // 5. Append ambient global Window declaration
+    const dtsContent = await Bun.file(dtsOutputFile).text();
+    const typeAlias =
+      globalName.charAt(0).toUpperCase() +
+      globalName.slice(1).replace(/[^a-zA-Z0-9]/g, '');
+
+    const globalDeclaration = `
+
 type ${typeAlias}Type = typeof ${globalName};
 
 declare global {
-interface Window {
-${globalName}: ${typeAlias}Type;
-}
-var ${globalName}: ${typeAlias}Type;
+  interface Window {
+    ${globalName}: ${typeAlias}Type;
+  }
+  var ${globalName}: ${typeAlias}Type;
 }
 `;
-  await Bun.write(dtsOutputFile, dtsContent + globalDeclaration);
 
-  console.log(`✅ Success! Outputs written to:\n - ${jsOutputFile}\n - ${dtsOutputFile}`);
+    await Bun.write(dtsOutputFile, dtsContent + globalDeclaration);
+  } else {
+    console.warn(
+      `⚠️  No type definitions found for ${pkgName}. Skipping .d.ts generation.`
+    );
+  }
 
+  console.log(
+    `✅ Success! Outputs written to:\n - ${jsOutputFile}\n - ${dtsOutputFile}`
+  );
 } catch (err) {
   console.error(`❌ Error: ${err.message}`);
+  process.exit(1);
 } finally {
   // Clean up temp folder
-  // rmSync(tempDir, { recursive: true, force: true });
+  rmSync(tempDir, { recursive: true, force: true });
 }

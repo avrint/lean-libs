@@ -21,7 +21,13 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
+    "@rollup/plugin-commonjs": "^29.0.3",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-terser": "^1.0.0",
+    "@typescript/typescript6": "^6.0.2",
     "glob": "13.0.6",
+    "rollup": "^4.64.0",
+    "rollup-plugin-dts": "^6.5.1",
     "typescript": "^7.0.2",
     "yargs": "17.7.2"
   }
