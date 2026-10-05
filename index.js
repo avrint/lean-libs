@@ -132,11 +132,23 @@ try {
     file: jsOutputFile,
     format: 'umd',
     name: globalName,
+    exports: 'auto',
     sourcemap: false,
   });
 
   await jsBundle.close();
 
+  // Append the global-export helper AFTER minification
+  // (footer is stripped by terser, so we do it manually)
+  const extra = `
+// Ensure the main export is also available directly on the global
+if (typeof ${globalName} === 'object' && ${globalName} !== null) {
+  if ('${globalName}' in ${globalName}) {
+    window.${globalName} = ${globalName}['${globalName}'];
+  }
+}
+`;
+  await Bun.write(jsOutputFile, (await Bun.file(jsOutputFile).text()) + extra);
   // -------------------------------------------------------
   // 4. Programmatic type definition bundle with rollup-plugin-dts
   // -------------------------------------------------------
