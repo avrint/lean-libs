@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
+import { glob } from 'glob';
+
 
 const argv = yargs(hideBin(process.argv))
   .scriptName('lean-libs')
@@ -48,7 +50,7 @@ try {
   // 1. Initialize temporary package and install requested library
   Bun.spawnSync(['bun', 'init', '-y'], { cwd: tempDir });
   console.log(`⬇️  Installing ${pkgName}...`);
-  const installRes = Bun.spawnSync(['bun', 'add', pkgName, 'esbuild', 'dts-bundle-generator'], { cwd: tempDir });
+  const installRes = Bun.spawnSync(['bun', 'add', pkgName, 'esbuild', 'typescript'], { cwd: tempDir });
 
   if (installRes.exitCode !== 0) {
     throw new Error(`Failed to install package: ${installRes.stderr.toString()}`);
@@ -68,7 +70,7 @@ try {
   // 3. Bundle JS into UMD format using esbuild
   console.log(`⚡ Bundling UMD to ${jsOutputFile}...`);
   const esbuildRes = Bun.spawnSync([
-    'npx', 'esbuild', entryPoint,
+    'bun', 'esbuild', entryPoint,
     '--bundle',
     '--minify',
     '--format=iife',
@@ -80,39 +82,38 @@ try {
     throw new Error(`esbuild error: ${esbuildRes.stderr.toString()}`);
   }
 
-  const typesEntryPoint = path.join(tempDir, 'node_modules', pkgName, pkgJson.types || pkgJson.typings || 'index.d.ts'); Bun.spawnSync(['npx', 'dts-bundle-generator', '-o', dtsOutputFile, typesEntryPoint, '--no-check'], { cwd: tempDir });
+  const typesTempDir = path.join(tempDir, 'types-out');
+  mkdirSync(typesTempDir, { recursive: true });
 
-  // 4. Bundle d.ts types using dts-bundle-generator
+
+  // 4. Generate d.ts types using tsc
   console.log(`📝 Bundling type definitions to ${dtsOutputFile}...`);
   const dtsRes = Bun.spawnSync([
-    'npx', 'dts-bundle-generator',
-    '-o', dtsOutputFile,
-    typesEntryPoint,
-    '--no-check',
-    '--export-nameless'
+    'bun', 'tsc', entryPoint,
+    '--declaration',
+    '--allowJs',
+    '--ignoreConfig',
+    '--emitDeclarationOnly',
+    '--outDir', typesTempDir
   ], { cwd: tempDir });
 
   if (dtsRes.exitCode !== 0) {
-    // Fallback: try resolving type entry from package.json types/typings field
-    const typesEntry = pkgJson.types || pkgJson.typings;
-    if (typesEntry) {
-      const altEntryPoint = path.join(tempDir, 'node_modules', pkgName, typesEntry);
-      Bun.spawnSync([
-        'npx', 'dts-bundle-generator',
-        '-o', dtsOutputFile,
-        altEntryPoint,
-        '--no-check'
-      ], { cwd: tempDir });
-    }
+    throw new Error(`tsc error: ${dtsRes.stderr.toString()}\n${dtsRes.stdout.toString()}`);
   }
 
+  const generatedDtsPath = await glob("*.d.*ts", { cwd: typesTempDir, absolute: true });
+
   // 5. Append ambient global Window declaration to the d.ts file
-  const dtsContent = await Bun.file(dtsOutputFile).text();
+  const dtsContent = await Bun.file(generatedDtsPath[0]).text();
+  const typeAlias = globalName.charAt(0).toUpperCase() + globalName.slice(1);
   const globalDeclaration = `
+type ${typeAlias}Type = typeof ${globalName};
+
 declare global {
-  interface Window {
-    ${globalName}: typeof ${globalName};
-  }
+interface Window {
+${globalName}: ${typeAlias}Type;
+}
+var ${globalName}: ${typeAlias}Type;
 }
 `;
   await Bun.write(dtsOutputFile, dtsContent + globalDeclaration);
@@ -123,5 +124,5 @@ declare global {
   console.error(`❌ Error: ${err.message}`);
 } finally {
   // Clean up temp folder
-  rmSync(tempDir, { recursive: true, force: true });
+  // rmSync(tempDir, { recursive: true, force: true });
 }
