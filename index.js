@@ -34,7 +34,7 @@ const argv = yargs(hideBin(process.argv))
   .help()
   .argv;
 
-const pkgName = argv._[0];
+const pkgName = argv.package;
 const globalName = argv['global-name'] || pkgName;
 const jsOutDir = path.resolve(process.cwd(), argv['js-out']);
 const dtsOutDir = path.resolve(process.cwd(), argv['dts-out']);
